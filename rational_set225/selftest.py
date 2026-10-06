@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .font import MathFont
 from .layout import Layout
-from . import expr
+from . import expr, solve
 from .nodes import ValidationError, validate_font_size, validate_tree
-from .typeset import typeset
+from .typeset import typeset, typeset_condition
 from .svg import render_svg
 
 FONT_PATH = Path(__file__).resolve().parent.parent / "fonts" / "STIXTwoMath-Regular.otf"
@@ -123,6 +123,27 @@ def main():
                        for it in rad_box.items if it[0] == "glyph")
     assert glyph_bottom <= -rad_box.depth + 48.0 / font.upem * 200
 
+    # multi-level denominators: assembled radical ink must fully cover the
+    # radicand (regression: nested fractions protruded below the surd)
+    deep_frac = {"type": "text", "value": "x+2"}
+    for _ in range(4):
+        deep_frac = {"type": "frac", "num": {"type": "text", "value": "1"},
+                     "den": deep_frac}
+    lay = Layout(font, SIZE)
+    inner_box = lay.layout(
+        validate_tree(deep_frac, lambda ch: font.glyph_for(ch) is not None))
+    (_, _, _, _), sqrt_box = render({"type": "sqrt", "radicand": deep_frac})
+    k = SIZE / font.upem
+    gap = lay.const("RadicalVerticalGap", SIZE)
+    rule_t = lay.const("RadicalRuleThickness", SIZE)
+    bar_top = inner_box.height + gap + rule_t
+    content_bottom = -inner_box.depth - gap
+    surd = [it for it in sqrt_box.items if it[0] == "glyph" and it[2] == 0.0]
+    surd_top = max(it[3] + font.bounds(it[1])[3] * k for it in surd)
+    surd_bottom = min(it[3] + font.bounds(it[1])[1] * k for it in surd)
+    assert surd_top >= bar_top - 1e-6
+    assert surd_bottom <= content_bottom + 1e-6
+
     # raised-content parentheses cover the full content height/depth
     raised = {"type": "scripts",
               "base": {"type": "text", "value": "x"},
@@ -131,6 +152,7 @@ def main():
     assert pbox.height >= raised_height_check(raised)
 
     _selftest_algebra(client)
+    _selftest_solve(client)
     print("selftest OK")
 
 
@@ -218,6 +240,126 @@ def _selftest_algebra(client):
                       [{"type": "num", "n": "__import__('os')", "d": 1}, num(1)]):
         resp = client.post("/check", json={"font_size": SIZE, "steps": bad_steps})
         assert resp.status_code == 422
+
+
+def _selftest_solve(client):
+    x = {"type": "var"}
+
+    def num(v, d=1):
+        return {"type": "num", "n": v, "d": d}
+
+    def binop(op, l, r):
+        return {"type": op, "left": l, "right": r}
+
+    def pw(base, e):
+        return {"type": "pow", "base": base, "exp": e}
+
+    def cond(l, r, rel):
+        return {"left": l, "right": r, "relation": rel}
+
+    def run(conditions):
+        specs = solve.validate_conditions(conditions)
+        conds = solve.analyze_conditions(specs)
+        return solve.solve_system(conds)
+
+    # (x-1)/(x-2) > 0 -> (-inf, 1) u (2, +inf), both ends open
+    res = run([cond(binop("div", binop("sub", x, num(1)),
+                          binop("sub", x, num(2))), num(0), "gt")])
+    parts = res["solution_set"]["parts"]
+    assert res["solution_set"]["kind"] == "set" and len(parts) == 2
+    assert parts[0]["lower"]["kind"] == "infinity"
+    assert parts[0]["upper"]["point"]["value"] == "1"
+    assert not parts[0]["upper"]["closed"]
+    assert parts[1]["lower"]["point"]["value"] == "2"
+    assert not parts[1]["lower"]["closed"]
+    assert parts[1]["upper"]["kind"] == "infinity"
+    # critical point 2 is undefined, not "equality fails"
+    rows = {r["point"].get("value"): r for r in res["sign_table"]["points"]}
+    assert rows["2"]["differences"] == ["undefined"]
+    assert rows["2"]["defined"] == [False]
+    assert rows["1"]["differences"] == ["zero"]
+
+    # (x-1)(x-2) <= 0 and x != 3/2 -> [1, 3/2) u (3/2, 2]
+    prod = binop("mul", binop("sub", x, num(1)), binop("sub", x, num(2)))
+    res = run([cond(prod, num(0), "le"),
+               cond(x, num(3, 2), "ne")])
+    parts = res["solution_set"]["parts"]
+    assert len(parts) == 2
+    assert parts[0]["lower"]["closed"] and parts[0]["lower"]["point"]["value"] == "1"
+    assert parts[0]["upper"]["point"]["value"] == "3/2"
+    assert not parts[0]["upper"]["closed"]
+    assert not parts[1]["lower"]["closed"]
+    assert parts[1]["upper"]["closed"] and parts[1]["upper"]["point"]["value"] == "2"
+
+    # (x-1)^2 <= 0 -> isolated point x = 1; even multiplicity must not
+    # fake a sign change on either side
+    res = run([cond(pw(binop("sub", x, num(1)), 2), num(0), "le")])
+    sol = res["solution_set"]
+    assert sol["kind"] == "set" and len(sol["parts"]) == 1
+    assert sol["parts"][0] == {"type": "point", "point":
+                               {"kind": "rational", "value": "1", "approx": 1.0}}
+    signs = [row["differences"][0] for row in res["sign_table"]["intervals"]]
+    assert signs == ["positive", "positive"]
+
+    # x^2 + 1 <= 0 -> empty set, stated explicitly
+    res = run([cond(binop("add", pw(x, 2), num(1)), num(0), "le")])
+    assert res["solution_set"] == {"kind": "empty", "parts": []}
+
+    # x - x == 0 -> the whole real axis
+    res = run([cond(binop("sub", x, x), num(0), "eq")])
+    assert res["solution_set"]["kind"] == "all"
+
+    # 1/(x-1) == 1/(x-1): identity, but x = 1 stays undefined
+    inv = binop("div", num(1), binop("sub", x, num(1)))
+    res = run([cond(inv, inv, "eq")])
+    parts = res["solution_set"]["parts"]
+    assert len(parts) == 2
+    assert parts[0]["upper"]["point"]["value"] == "1"
+    assert parts[1]["lower"]["point"]["value"] == "1"
+    assert res["sign_table"]["points"][0]["defined"] == [False]
+
+    # x^2 - 2 >= 0 -> algebraic endpoints, exact CRootOf, no float merging
+    res = run([cond(binop("sub", pw(x, 2), num(2)), num(0), "ge")])
+    parts = res["solution_set"]["parts"]
+    assert len(parts) == 2
+    lo = parts[0]["upper"]["point"]
+    hi = parts[1]["lower"]["point"]
+    assert lo["kind"] == "algebraic" and hi["kind"] == "algebraic"
+    assert parts[0]["upper"]["closed"] and parts[1]["lower"]["closed"]
+    assert lo["approx"] < 0 < hi["approx"]
+    assert lo["poly"] == hi["poly"] and lo["index"] != hi["index"]
+
+    # forbidden points inherited through cancellation: x/x - 1 >= 0 holds
+    # everywhere except x = 0, where the original expression is undefined
+    res = run([cond(binop("div", x, x), num(1), "ge")])
+    parts = res["solution_set"]["parts"]
+    assert len(parts) == 2
+    assert res["sign_table"]["points"][0]["defined"] == [False]
+
+    # HTTP end to end, including per-condition SVG with the relation symbol
+    resp = client.post("/solve", json={
+        "font_size": SIZE,
+        "conditions": [cond(binop("div", binop("sub", x, num(1)),
+                                  binop("sub", x, num(2))), num(0), "gt")]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["conditions"]) == 1
+    assert data["conditions"][0]["svg"].startswith("<svg")
+    assert data["conditions"][0]["width"] > 0
+    assert data["solution_set"]["kind"] == "set"
+    assert len(data["sign_table"]["intervals"]) == 3
+
+    # rejections: bad relation, wrong count, string expressions
+    for bad in (
+        {"font_size": SIZE, "conditions": []},
+        {"font_size": SIZE,
+         "conditions": [cond(x, x, "eq")] * 7},
+        {"font_size": SIZE, "conditions": [cond(x, x, "approx")]},
+        {"font_size": SIZE, "conditions": [{"left": "x+1", "right": x,
+                                            "relation": "eq"}]},
+    ):
+        resp = client.post("/solve", json=bad)
+        assert resp.status_code == 422, bad
 
 
 if __name__ == "__main__":

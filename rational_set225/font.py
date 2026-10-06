@@ -178,6 +178,23 @@ class MathFont:
                 else:
                     sequence.insert(idx, ext)
                 guard += 1
+            # FullAdvance totals overstate real ink coverage (connector
+            # overlap and side bearings shrink the drawn span), so deep
+            # content such as nested fractions could still stick out of the
+            # assembled glyph. Grow the assembly until its actual ink spans
+            # the target as well.
+            guard = 0
+            while self._sequence_ink_span(sequence, assembly) < target and guard < 10000:
+                mid = len(sequence) // 2
+                idx = min(
+                    range(len(sequence)),
+                    key=lambda i: (abs(i - mid), 0 if sequence[i].is_extender else 1),
+                )
+                if sequence[idx].is_extender:
+                    sequence.insert(idx, sequence[idx])
+                else:
+                    sequence.insert(idx, ext)
+                guard += 1
         else:
             sequence = non_ext
 
@@ -198,3 +215,26 @@ class MathFont:
             pieces.append((p.glyph, center))
             cursor -= adv
         return pieces, total
+
+    def _sequence_ink_span(self, sequence, assembly: Assembly) -> float:
+        """Actual drawn (ink) height of an assembly sequence, in font units."""
+        total = 0.0
+        for i, p in enumerate(sequence):
+            total += p.full_advance
+            if i:
+                total -= assembly.min_connector
+        cursor = total / 2.0
+        top = bottom = None
+        for i, p in enumerate(sequence):
+            adv = p.full_advance
+            if i:
+                cursor += assembly.min_connector
+            center = cursor - adv / 2.0
+            cursor -= adv
+            y_min, y_max = self.bounds(p.glyph)[1], self.bounds(p.glyph)[3]
+            piece_top, piece_bottom = center + y_max, center + y_min
+            top = piece_top if top is None else max(top, piece_top)
+            bottom = piece_bottom if bottom is None else min(bottom, piece_bottom)
+        if top is None:
+            return 0.0
+        return top - bottom

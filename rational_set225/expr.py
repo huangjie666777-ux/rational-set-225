@@ -212,30 +212,63 @@ def restriction_points(restrictions: dict[tuple, int]) -> list:
     Roots are thus deduplicated algebraically without floating tolerances.
     """
     points = []
-    seen_linear: set[Fraction] = set()
     for key in sorted(restrictions):
-        p = Poly(key, X, domain=ZZ)
-        if p.total_degree() == 0:
-            continue
-        if p.total_degree() == 1:
-            a, b = (int(c) for c in p.all_coeffs())
-            root = Fraction(-b, a)
-            if root in seen_linear:
-                continue
-            seen_linear.add(root)
-            points.append({"kind": "rational", "value": _fraction_str(root),
-                           "approx": float(root)})
-            continue
-        count = sympy.count_roots(p.as_expr())
-        for j in range(count):
-            root = sympy.CRootOf(p.as_expr(), j)
-            points.append({"kind": "algebraic",
-                           "poly": _poly_str(p),
-                           "index": j,
-                           "root": str(root),
-                           "approx": float(root.evalf(30))})
-    points.sort(key=lambda q: q["approx"])
+        points.extend(_factor_points(Poly(key, X, domain=ZZ)))
+    return _dedup_sort(points)
+
+
+def poly_real_points(p: Poly) -> list:
+    """Exact distinct real zeros of an integer-coefficient polynomial.
+
+    The polynomial is factored over ZZ first; each irreducible factor
+    contributes its real roots exactly once (rational roots as Fraction,
+    others as CRootOf), so no floating-point tolerance is involved.
+    """
+    points = []
+    if p.is_zero:
+        return points
+    _, factors = p.factor_list()
+    for factor, _mult in factors:
+        factor = factor.primitive()[1]
+        if factor.LC() < 0:
+            factor = -factor
+        points.extend(_factor_points(factor))
+    return _dedup_sort(points)
+
+
+def _factor_points(p: Poly) -> list:
+    """Real roots of one irreducible (or constant) factor."""
+    if p.total_degree() == 0:
+        return []
+    if p.total_degree() == 1:
+        a, b = (int(c) for c in p.all_coeffs())
+        root = Fraction(-b, a)
+        return [{"kind": "rational", "value": _fraction_str(root),
+                 "approx": float(root)}]
+    points = []
+    count = sympy.count_roots(p.as_expr())
+    for j in range(count):
+        root = sympy.CRootOf(p.as_expr(), j)
+        points.append({"kind": "algebraic",
+                       "poly": _poly_str(p),
+                       "index": j,
+                       "root": str(root),
+                       "approx": float(root.evalf(30))})
     return points
+
+
+def point_key(pt: dict):
+    """Canonical identity of an exact point for dedup and membership tests."""
+    if pt["kind"] == "rational":
+        return ("rational", Fraction(pt["value"]))
+    return ("algebraic", pt["poly"], pt["index"])
+
+
+def _dedup_sort(points: list) -> list:
+    merged = {}
+    for pt in points:
+        merged.setdefault(point_key(pt), pt)
+    return sorted(merged.values(), key=lambda q: q["approx"])
 
 
 def _fraction_str(fr: Fraction) -> str:

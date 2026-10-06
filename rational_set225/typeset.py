@@ -9,6 +9,9 @@ from __future__ import annotations
 MINUS = "\u2212"
 CDOT = "\u00b7"
 
+RELATION_SYMBOLS = {"eq": "=", "ne": "\u2260", "lt": "<", "le": "\u2264",
+                    "gt": ">", "ge": "\u2265"}
+
 
 def _text(s: str) -> dict:
     return {"type": "text", "value": s}
@@ -44,6 +47,12 @@ def _is_negative_const(t: dict) -> bool:
 
 def typeset(t: dict) -> dict:
     return _build(t, outer=0)
+
+
+def typeset_condition(left: dict, right: dict, relation: str) -> dict:
+    """Render 'left <relation> right' as a single row, both sides faithful."""
+    symbol = RELATION_SYMBOLS[relation]
+    return _row([_build(left, 0), _text(f" {symbol} "), _build(right, 0)])
 
 
 def _build(t: dict, outer: int) -> dict:

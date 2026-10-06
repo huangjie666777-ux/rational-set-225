@@ -4,7 +4,9 @@
 不依赖字体文件、外链、脚本或 foreignObject）。使用
 fonts/STIXTwoMath-Regular.otf 的真实字形轮廓、前进宽度、斜体修正与
 OpenType MATH 表度量，不做等宽估算。另提供 POST /check 有理式演算核验，
-供教师核对学生约分、通分等步骤的值与实数定义域。
+供教师核对学生约分、通分等步骤的值与实数定义域。另提供 POST /solve
+有理式不等式（组）求解：给出实数解集与完整符号表，供教师备课确定
+全部解，而不只是核对变形。
 
 ## 运行
 
@@ -69,6 +71,92 @@ verdict 三态：
 其精确实代数根表示，approx 仅供展示排序。根去重基于不可约因子的代数结构
 （因子先在整数上分解后合并重数），不使用浮点容差。
 
+POST /solve 有理式不等式（组）求解：提交 1 至 6 个同时成立的条件与字号，
+返回实数解集、符号表，以及每个条件按原树排版（含关系符号）的 SVG 尺寸。
+
+    {
+      "font_size": 48,
+      "conditions": [
+        {"left":  <表达式树>, "right": <表达式树>, "relation": "gt"},
+        {"left":  <表达式树>, "right": <表达式树>, "relation": "le"}
+      ]
+    }
+
+relation 取 eq/ne/lt/le/gt/ge。表达式树与 /check 完全相同（同一套节点、
+输入限制与精确运算，不解析字符串）；每个条件按 left-right 构造差式，
+继承两边每个原始子式的禁取值——约分、嵌套除法与零次幂都不能解除它们。
+
+返回:
+
+    {
+      "conditions": [
+        {"relation": "gt",
+         "difference": {"numerator": "1", "denominator": "x - 2"},
+         "zeros": [...], "forbidden": [...],
+         "svg": "<svg ...>", "width": .., "height": .., "baseline": ..}
+      ],
+      "sign_table": {
+        "critical_points": [...],
+        "intervals": [
+          {"lower": {"kind": "infinity", "sign": "negative"},
+           "upper": {"kind": "point", "closed": false, "point": {...}},
+           "sample": "0",
+           "differences": ["positive"],
+           "satisfied": [true],
+           "all_satisfied": true}, ...
+        ],
+        "points": [
+          {"point": {...},
+           "differences": ["zero" | "positive" | "negative" | "undefined"],
+           "defined": [true], "satisfied": [...], "all_satisfied": ...}, ...
+        ]
+      },
+      "solution_set": {
+        "kind": "set" | "empty" | "all",
+        "parts": [
+          {"type": "interval",
+           "lower": {"kind": "point", "closed": true, "point": {...}}
+                    | {"kind": "infinity", "sign": "negative"},
+           "upper": ...},
+          {"type": "point", "point": {...}}
+        ]
+      }
+    }
+
+求解规则：
+
+- 临界点为各差式分子的实零点与全部禁取点的并集，精确去重排序
+  （有理根按分数比较；代数根按不可约因子与 CRootOf 序号比较；
+  有理数与代数根之间用 count_roots 在 (-oo, r] 上精确判定）。
+- 每个开区间取一个精确有理数样本点（由隔离区间夹逼并验证）判定各差式
+  正负；恒零差式记 "zero"。重根不会误判变号，因为符号来自采样而非
+  奇偶性猜测。
+- 临界点单独判断：是该条件禁取点则记 "undefined"（条件不成立），否则
+  精确判定差式符号，区分等号成立与表达式无定义。
+- solution_set 为满足全部条件的互不重叠最大区间与孤立点；端点标明
+  开闭与正负无穷；空集 kind="empty"，全实轴 kind="all"。有限端点只用
+  精确有理数或实代数根，不用浮点容差合并近根，不以浮点网格抽样代替
+  求解；任何求不出全解的输入都会报错而不是返回部分成功。
+
+备课示例（(x-1)/(x-2) > 0 且 x^2 - 2 >= 0）:
+
+    curl -X POST localhost:8123/solve -H 'Content-Type: application/json' -d '{
+      "font_size": 48,
+      "conditions": [
+        {"left": {"type":"div","left":{"type":"sub","left":{"type":"var"},
+            "right":{"type":"num","n":1}},
+          "right":{"type":"sub","left":{"type":"var"},
+            "right":{"type":"num","n":2}}},
+         "right": {"type":"num","n":0}, "relation": "gt"},
+        {"left": {"type":"sub",
+            "left":{"type":"pow","base":{"type":"var"},"exp":2},
+            "right":{"type":"num","n":2}},
+         "right": {"type":"num","n":0}, "relation": "ge"}
+      ]}'
+
+解集为 (-inf, -sqrt(2)] u (2, +inf)：第一部分上端点为代数根
+CRootOf(x**2 - 2, 0)（闭），第二部分下端点为有理数 2（开）。
+
 ## 有理式表达式树
 
 仅接受以下结构化节点；任何字符串表达式或代码一律拒绝：
@@ -129,10 +217,11 @@ viewBox 按全部墨迹与横线的实际包围盒计算，不发生裁切。
 - rational_set225/font.py    字体读取：度量、MATH 常量、轮廓路径、伸展变体与拼装
 - rational_set225/nodes.py   排版树校验（深度/节点数/字号/字符覆盖限制）
 - rational_set225/expr.py    有理式树校验、精确有理运算、禁取点实根、逐步比较
+- rational_set225/solve.py   不等式组求解：临界点精确排序、区间采样符号表、解集归并
 - rational_set225/typeset.py 有理式树到既有排版节点的转换
 - rational_set225/layout.py  递归布局：行、分式、上下标、根号、括号（伸展件按墨迹钳制覆盖）
 - rational_set225/svg.py     SVG 绘制与包围盒/基线计算
-- rational_set225/app.py     FastAPI HTTP 交付（/render 与 /check）
+- rational_set225/app.py     FastAPI HTTP 交付（/render、/check 与 /solve）
 - rational_set225/selftest.py 自测
 
 ## 范围与限制

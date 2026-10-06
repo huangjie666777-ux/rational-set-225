@@ -10,9 +10,9 @@ from pydantic import BaseModel
 
 from .font import MathFont, FontError
 from .layout import Layout
-from . import expr
+from . import expr, solve
 from .nodes import ValidationError, validate_font_size, validate_tree
-from .typeset import typeset
+from .typeset import typeset, typeset_condition
 from .svg import render_svg
 
 FONT_PATH = Path(__file__).resolve().parent.parent / "fonts" / "STIXTwoMath-Regular.otf"
@@ -28,6 +28,11 @@ class RenderRequest(BaseModel):
 
 class CheckRequest(BaseModel):
     steps: Any
+    font_size: Any
+
+
+class SolveRequest(BaseModel):
+    conditions: Any
     font_size: Any
 
 
@@ -77,3 +82,27 @@ async def check(req: CheckRequest):
     comparisons = [expr.compare_steps(fns[i], fns[i + 1])
                    for i in range(len(fns) - 1)]
     return {"steps": reports, "comparisons": comparisons}
+
+
+@app.post("/solve")
+async def solve_endpoint(req: SolveRequest):
+    size = validate_font_size(req.font_size)
+    specs = solve.validate_conditions(req.conditions)
+    conds = solve.analyze_conditions(specs)
+    reports = []
+    for cond in conds:
+        layout_tree = validate_tree(
+            typeset_condition(cond.left, cond.right, cond.relation),
+            lambda ch: _font.glyph_for(ch) is not None)
+        box = Layout(_font, size).layout(layout_tree)
+        svg, width, height, baseline = render_svg(box, _font)
+        report = solve.condition_report(cond)
+        report["svg"] = svg
+        report["width"] = width
+        report["height"] = height
+        report["baseline"] = baseline
+        reports.append(report)
+    result = solve.solve_system(conds)
+    return {"conditions": reports,
+            "sign_table": result["sign_table"],
+            "solution_set": result["solution_set"]}
