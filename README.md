@@ -64,6 +64,93 @@ verdict 三态：
 - not_identical：不恒等；cross_product_difference 为 N1·D2 − N2·D1 展开的
   整数系数差多项式，作为不恒等的代数证据（非抽样点判定）。
 
+POST /solve 有理式不等式组求解：提交 1 至 6 个同时成立的条件与字号，
+返回实数解集、完整符号表与每个条件按原式排版（含关系符号）的 SVG 尺寸。
+
+    {
+      "font_size": 48,
+      "conditions": [
+        {"left":  {"type":"div","left":{"type":"var"},
+                   "right":{"type":"sub","left":{"type":"var"},
+                            "right":{"type":"num","n":2}}},
+         "right": {"type":"num","n":0},
+         "relation": "gt"},
+        {"left": {"type":"var"}, "right": {"type":"num","n":5},
+         "relation": "le"}
+      ]
+    }
+
+relation 取 eq / ne / lt / le / gt / ge。返回:
+
+    {
+      "conditions": [
+        {"relation": "gt",
+         "difference": {"numerator": "2", "denominator": "x - 2"},
+         "forbidden": [{"kind":"rational","value":"2","approx":2.0}],
+         "svg": "<svg ...>", "width": .., "height": .., "baseline": ..},
+        ...
+      ],
+      "sign_table": {
+        "critical_points": [{"kind":"rational","value":"2","approx":2.0}, ...],
+        "intervals": [
+          {"left": {"kind":"infinity","sign":"negative"},
+           "right": {"kind":"rational","value":"2","approx":2.0},
+           "sample": "1",
+           "signs": ["negative", ...],       各差式 left-right 在本区间的符号
+           "conditions": [false, ...],       各条件真假
+           "solution": false},               合取结果
+          ...
+        ],
+        "points": [
+          {"point": {"kind":"rational","value":"2","approx":2.0},
+           "status": ["undefined", ...],     zero/positive/negative/undefined
+           "conditions": [false, ...],
+           "solution": false},
+          ...
+        ]
+      },
+      "solution": {
+        "kind": "set",
+        "intervals": [
+          {"left":  {"point": {"kind":"rational","value":"2",...}, "open": true},
+           "right": {"kind":"infinity","sign":"positive"}}
+        ],
+        "points": []
+      }
+    }
+
+求解规则：
+
+- 以各条件左右差（left − right）的实零点与全部禁取点划分整条实轴；
+  临界点精确去重排序（有理数 + 实代数根 CRootOf，不用浮点容差合并）。
+- 每个开区间用有理样本点精确判定各差式正负或恒零（zero），重根不会
+  误判变号；临界点单独判定，等号成立（zero）与表达式无定义
+  （undefined）明确区分。
+- solution 为互不重叠的最大区间与孤立点：端点 open 标明开闭，
+  {"kind":"infinity","sign":"negative"/"positive"} 表示正负无穷；
+  kind=empty 为空集，kind=all 为全实轴。有限端点用精确有理数或实代数
+  根（poly 不可约整系数多项式 + index + CRootOf），不以浮点网格抽样
+  代替求解；求解失败或输入非法返回 422，不输出未求全的成功结果。
+- 每个条件的 SVG 从原始表达式树生成，含关系符号（= ≠ < ≤ > ≥）。
+
+备课示例（求 (x−1)/(x−2) > 0 且 x ≤ 5）：
+
+    curl -X POST localhost:8123/solve -H 'Content-Type: application/json' -d '{
+      "font_size": 48,
+      "conditions": [
+        {"left": {"type":"div","left":{"type":"sub","left":{"type":"var"},
+                                       "right":{"type":"num","n":1}},
+                  "right":{"type":"sub","left":{"type":"var"},
+                                       "right":{"type":"num","n":2}}},
+         "right": {"type":"num","n":0}, "relation": "gt"},
+        {"left": {"type":"var"}, "right": {"type":"num","n":5},
+         "relation": "le"}
+      ]}'
+
+解集为 (-∞, 1) ∪ (2, 5]：sign_table.intervals/points 给出每个区间与临界
+点上各差式符号、各条件真假与合取结果，solution.intervals 的端点
+open=false 表示闭端点（x=5 处等号成立）。
+
 禁取点：kind=rational 时 value 为整数字符串或 "p/q" 分数；kind=algebraic
 时 poly 为整系数不可约多项式、index 为 SymPy CRootOf 的实根序号、root 为
 其精确实代数根表示，approx 仅供展示排序。根去重基于不可约因子的代数结构
@@ -129,10 +216,11 @@ viewBox 按全部墨迹与横线的实际包围盒计算，不发生裁切。
 - rational_set225/font.py    字体读取：度量、MATH 常量、轮廓路径、伸展变体与拼装
 - rational_set225/nodes.py   排版树校验（深度/节点数/字号/字符覆盖限制）
 - rational_set225/expr.py    有理式树校验、精确有理运算、禁取点实根、逐步比较
+- rational_set225/solve.py   不等式组求解：临界点划分、符号表、解集归一化
 - rational_set225/typeset.py 有理式树到既有排版节点的转换
 - rational_set225/layout.py  递归布局：行、分式、上下标、根号、括号（伸展件按墨迹钳制覆盖）
 - rational_set225/svg.py     SVG 绘制与包围盒/基线计算
-- rational_set225/app.py     FastAPI HTTP 交付（/render 与 /check）
+- rational_set225/app.py     FastAPI HTTP 交付（/render、/check 与 /solve）
 - rational_set225/selftest.py 自测
 
 ## 范围与限制
@@ -143,3 +231,5 @@ viewBox 按全部墨迹与横线的实际包围盒计算，不发生裁切。
 - 排版结果确定：同一输入产生完全相同的 SVG；输入树不被修改。
 - /check 仅处理单变量 x 的有理函数（由上述节点构成）；无理式、多变量、
   表达式字符串与代码均不支持；2..10 步、节点/深度/次数超限返回 422。
+- /solve 同样仅处理单变量 x；1..6 个条件，relation 限 eq/ne/lt/le/gt/ge，
+  其余限制与 /check 相同。

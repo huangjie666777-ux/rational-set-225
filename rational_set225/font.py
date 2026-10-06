@@ -148,6 +148,32 @@ class MathFont:
         non_ext = [p for p in assembly.parts if not p.is_extender][::-1]
         extenders = [p for p in assembly.parts if p.is_extender]
 
+        def layout_sequence(sequence):
+            total = 0.0
+            for i, p in enumerate(sequence):
+                total += p.full_advance
+                if i:
+                    total -= assembly.min_connector
+            pieces: list[tuple[str, float]] = []
+            cursor = total / 2.0  # top edge in y-up coords relative to center
+            for i, p in enumerate(sequence):
+                adv = p.full_advance
+                if i:
+                    cursor += assembly.min_connector
+                center = cursor - adv / 2.0
+                pieces.append((p.glyph, center))
+                cursor -= adv
+            return pieces, total
+
+        def ink_span(pieces):
+            top = bottom = None
+            for glyph, off in pieces:
+                y0, y1 = self.bounds(glyph)[1], self.bounds(glyph)[3]
+                b, t = off + y0, off + y1
+                bottom = b if bottom is None else min(bottom, b)
+                top = t if top is None else max(top, t)
+            return top - bottom
+
         if extenders:
             ext = extenders[0]
             sequence: list[AssemblyPart] = []
@@ -178,23 +204,26 @@ class MathFont:
                 else:
                     sequence.insert(idx, ext)
                 guard += 1
+            # Connector overlap and side bearings make the inked span shorter
+            # than the advance-based span; deep radicands (e.g. stacked
+            # fractions) then protrude past the radical. Keep adding extenders
+            # until the actual ink covers the target.
+            while guard < 10000:
+                pieces, total = layout_sequence(sequence)
+                if ink_span(pieces) >= target:
+                    return pieces, total
+                mid = len(sequence) // 2
+                idx = min(
+                    range(len(sequence)),
+                    key=lambda i: (abs(i - mid), 0 if sequence[i].is_extender else 1),
+                )
+                if sequence[idx].is_extender:
+                    sequence.insert(idx, sequence[idx])
+                else:
+                    sequence.insert(idx, ext)
+                guard += 1
+            return layout_sequence(sequence)
         else:
             sequence = non_ext
-
-        total = 0.0
-        for i, p in enumerate(sequence):
-            total += p.full_advance
-            if i:
-                total -= assembly.min_connector
-        total = max(total, target)
-
-        pieces: list[tuple[str, float]] = []
-        cursor = total / 2.0  # top edge in y-up coords relative to center
-        for i, p in enumerate(sequence):
-            adv = p.full_advance
-            if i:
-                cursor += assembly.min_connector
-            center = cursor - adv / 2.0
-            pieces.append((p.glyph, center))
-            cursor -= adv
-        return pieces, total
+            pieces, total = layout_sequence(sequence)
+            return pieces, max(total, target)

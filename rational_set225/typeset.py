@@ -9,6 +9,15 @@ from __future__ import annotations
 MINUS = "\u2212"
 CDOT = "\u00b7"
 
+RELATION_SYMBOLS = {
+    "eq": "=",
+    "ne": "\u2260",
+    "lt": "<",
+    "le": "\u2264",
+    "gt": ">",
+    "ge": "\u2265",
+}
+
 
 def _text(s: str) -> dict:
     return {"type": "text", "value": s}
@@ -44,6 +53,13 @@ def _is_negative_const(t: dict) -> bool:
 
 def typeset(t: dict) -> dict:
     return _build(t, outer=0)
+
+
+def typeset_condition(cond: dict) -> dict:
+    """Render one condition as left <relation> right from the original trees."""
+    symbol = RELATION_SYMBOLS[cond["relation"]]
+    return _row([_build(cond["left"], 0), _text(f" {symbol} "),
+                 _build(cond["right"], 0)])
 
 
 def _build(t: dict, outer: int) -> dict:

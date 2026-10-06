@@ -47,11 +47,14 @@ def validate_steps(payload: Any) -> list[dict]:
         raise ExprError("steps must be a list of expression trees")
     if not (MIN_STEPS <= len(payload) <= MAX_STEPS):
         raise ExprError(f"expected between {MIN_STEPS} and {MAX_STEPS} steps")
-    trees = [_validate(raw) for raw in payload]
-    for raw_tree in trees:
-        if count_nodes(raw_tree) > MAX_NODES:
-            raise ExprError(f"expression exceeds {MAX_NODES} nodes")
-    return trees
+    return [validate_expression(raw) for raw in payload]
+
+
+def validate_expression(raw: Any) -> dict:
+    tree = _validate(raw)
+    if count_nodes(tree) > MAX_NODES:
+        raise ExprError(f"expression exceeds {MAX_NODES} nodes")
+    return tree
 
 
 def _validate(node: Any, depth: int = 1) -> dict:

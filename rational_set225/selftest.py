@@ -8,8 +8,9 @@ from pathlib import Path
 from .font import MathFont
 from .layout import Layout
 from . import expr
+from . import solve
 from .nodes import ValidationError, validate_font_size, validate_tree
-from .typeset import typeset
+from .typeset import typeset, typeset_condition
 from .svg import render_svg
 
 FONT_PATH = Path(__file__).resolve().parent.parent / "fonts" / "STIXTwoMath-Regular.otf"
@@ -130,7 +131,32 @@ def main():
     (_, _, ph, _), pbox = render({"type": "paren", "child": raised})
     assert pbox.height >= raised_height_check(raised)
 
+    # stacked fractions inside a radical: the stretch assembly ink must reach
+    # both the bar and the bottom of the deep radicand (no protruding content)
+    deep_frac = {"type": "frac", "num": {"type": "text", "value": "1"},
+                 "den": {"type": "text", "value": "x+2"}}
+    for _ in range(4):
+        deep_frac = {"type": "frac", "num": deep_frac, "den": deep_frac}
+    sqrt_node = {"type": "sqrt", "radicand": deep_frac}
+    lay = Layout(font, SIZE)
+    rad_inner = lay.layout(validate_tree(deep_frac, lambda ch: font.glyph_for(ch)))
+    sqrt_box = lay.layout(validate_tree(sqrt_node, lambda ch: font.glyph_for(ch)))
+    gap = font.constant("RadicalVerticalGap") * SIZE / font.upem
+    rule_t = font.constant("RadicalRuleThickness") * SIZE / font.upem
+    ink_top = ink_bottom = None
+    for it in sqrt_box.items:
+        if it[0] != "glyph":
+            continue
+        b = font.bounds(it[1])
+        top = it[3] + b[3] * it[4]
+        bottom = it[3] + b[1] * it[4]
+        ink_top = top if ink_top is None else max(ink_top, top)
+        ink_bottom = bottom if ink_bottom is None else min(ink_bottom, bottom)
+    assert ink_top >= rad_inner.height + gap + rule_t - 1e-6
+    assert ink_bottom <= -rad_inner.depth - gap + 1e-6
+
     _selftest_algebra(client)
+    _selftest_solve(client)
     print("selftest OK")
 
 
@@ -218,6 +244,115 @@ def _selftest_algebra(client):
                       [{"type": "num", "n": "__import__('os')", "d": 1}, num(1)]):
         resp = client.post("/check", json={"font_size": SIZE, "steps": bad_steps})
         assert resp.status_code == 422
+
+
+def _selftest_solve(client):
+    x = {"type": "var"}
+
+    def num(v, d=1):
+        return {"type": "num", "n": v, "d": d}
+
+    def binop(op, l, r):
+        return {"type": op, "left": l, "right": r}
+
+    def pw(base, e):
+        return {"type": "pow", "base": base, "exp": e}
+
+    def cond(left, relation, right):
+        return {"left": left, "right": right, "relation": relation}
+
+    def run(conditions):
+        return solve.solve_system(solve.validate_conditions(conditions))
+
+    def sol_summary(result):
+        sol = result["solution"]
+        out = []
+        for iv in sol["intervals"]:
+            def end(e):
+                if e.get("kind") == "infinity":
+                    return "-inf" if e["sign"] == "negative" else "+inf"
+                bracket = "(" if e["open"] else "["
+                return bracket + (e["point"]["value"] if e["point"]["kind"] == "rational"
+                                  else e["point"]["root"])
+            out.append((end(iv["left"]), end(iv["right"])))
+        for p in sol["points"]:
+            out.append(p["value"] if p["kind"] == "rational" else p["root"])
+        return sol["kind"], out
+
+    # (x-1)/(x-2) > 0: (-inf,1) U (2,+inf); x=2 undefined, x=1 excluded
+    res = run([cond(binop("div", binop("sub", x, num(1)),
+                          binop("sub", x, num(2))), "gt", num(0))])
+    kind, out = sol_summary(res)
+    assert kind == "set" and out == [("-inf", "(1"), ("(2", "+inf")]
+    pts = res["sign_table"]["points"]
+    assert [p["status"] for p in pts] == [["zero"], ["undefined"]]
+
+    # (x-1)^2 = 0: double root, no sign change, isolated point {1}
+    res = run([cond(pw(binop("sub", x, num(1)), 2), "eq", num(0))])
+    kind, out = sol_summary(res)
+    assert kind == "set" and out == ["1"]
+    iv_signs = [iv["signs"] for iv in res["sign_table"]["intervals"]]
+    assert iv_signs == [["positive"], ["positive"]]  # no spurious sign change
+
+    # x^2 - 2 <= 0: closed algebraic endpoints
+    res = run([cond(binop("sub", pw(x, 2), num(2)), "le", num(0))])
+    sol = res["solution"]
+    assert sol["kind"] == "set" and len(sol["intervals"]) == 1
+    iv = sol["intervals"][0]
+    assert iv["left"]["open"] is False and iv["right"]["open"] is False
+    assert iv["left"]["point"]["kind"] == "algebraic"
+    assert iv["left"]["point"]["approx"] < 0 < iv["right"]["point"]["approx"]
+
+    # x^2 + 1 < 0: empty; x^2 + 1 > 0: all reals
+    assert run([cond(binop("add", pw(x, 2), num(1)), "lt", num(0))])["solution"]["kind"] == "empty"
+    assert run([cond(binop("add", pw(x, 2), num(1)), "gt", num(0))])["solution"]["kind"] == "all"
+
+    # x/x = 1: cancellation does not lift the forbidden point 0
+    res = run([cond(binop("div", x, x), "eq", num(1))])
+    kind, out = sol_summary(res)
+    assert out == [("-inf", "(0"), ("(0", "+inf")]
+    assert res["sign_table"]["points"][0]["status"] == ["undefined"]
+
+    # conjunction: x >= 0 and x < 1 gives [0, 1)
+    res = run([cond(x, "ge", num(0)), cond(x, "lt", num(1))])
+    kind, out = sol_summary(res)
+    assert out == [("[0", "(1")]
+
+    # conjunction of contradictions is empty
+    res = run([cond(x, "gt", num(1)), cond(x, "lt", num(0))])
+    assert res["solution"]["kind"] == "empty"
+
+    # (x-1)^0 = 1 keeps the base restriction x=1
+    res = run([cond(pw(binop("sub", x, num(1)), 0), "eq", num(1))])
+    kind, out = sol_summary(res)
+    assert out == [("-inf", "(1"), ("(1", "+inf")]
+
+    # condition SVG carries the relation symbol and typesets both sides
+    node = validate_tree(typeset_condition(
+        {"left": binop("div", num(1), x), "right": num(2), "relation": "le"}),
+        lambda ch: font.glyph_for(ch) is not None)
+    box = Layout(font, SIZE).layout(node)
+    svg, w, h, b = render_svg(box, font)
+    assert w > 0 and "<path" in svg
+
+    # HTTP /solve end to end
+    resp = client.post("/solve", json={
+        "font_size": SIZE,
+        "conditions": [cond(binop("div", binop("sub", x, num(1)),
+                                  binop("sub", x, num(2))), "gt", num(0))]})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["conditions"][0]["svg"].startswith("<svg")
+    assert data["solution"]["kind"] == "set"
+    assert len(data["sign_table"]["intervals"]) == 3
+
+    # rejections: 0 or 7 conditions, bad relation, string expressions
+    good = cond(x, "ge", num(0))
+    for bad in ([], [good] * 7, [cond(x, "approx", num(0))],
+                [{"left": "x+1", "right": num(0), "relation": "ge"}],
+                [{"left": x, "relation": "ge"}]):
+        resp = client.post("/solve", json={"font_size": SIZE, "conditions": bad})
+        assert resp.status_code == 422, bad
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""HTTP delivery: FastAPI app exposing POST /render."""
+"""HTTP delivery: FastAPI app exposing POST /render, /check and /solve."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,8 +11,9 @@ from pydantic import BaseModel
 from .font import MathFont, FontError
 from .layout import Layout
 from . import expr
+from . import solve
 from .nodes import ValidationError, validate_font_size, validate_tree
-from .typeset import typeset
+from .typeset import typeset, typeset_condition
 from .svg import render_svg
 
 FONT_PATH = Path(__file__).resolve().parent.parent / "fonts" / "STIXTwoMath-Regular.otf"
@@ -28,6 +29,11 @@ class RenderRequest(BaseModel):
 
 class CheckRequest(BaseModel):
     steps: Any
+    font_size: Any
+
+
+class SolveRequest(BaseModel):
+    conditions: Any
     font_size: Any
 
 
@@ -77,3 +83,20 @@ async def check(req: CheckRequest):
     comparisons = [expr.compare_steps(fns[i], fns[i + 1])
                    for i in range(len(fns) - 1)]
     return {"steps": reports, "comparisons": comparisons}
+
+
+@app.post("/solve")
+async def solve_endpoint(req: SolveRequest):
+    size = validate_font_size(req.font_size)
+    conditions = solve.validate_conditions(req.conditions)
+    result = solve.solve_system(conditions)
+    for cond, report in zip(conditions, result["conditions"]):
+        layout_tree = validate_tree(
+            typeset_condition(cond), lambda ch: _font.glyph_for(ch) is not None)
+        box = Layout(_font, size).layout(layout_tree)
+        svg, width, height, baseline = render_svg(box, _font)
+        report["svg"] = svg
+        report["width"] = width
+        report["height"] = height
+        report["baseline"] = baseline
+    return result
