@@ -1,0 +1,5 @@
+[project]
+name = "rational-set-225"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["fastapi==0.115.12", "uvicorn==0.34.2", "fonttools==4.59.0", "sympy==1.14.0"]
